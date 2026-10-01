@@ -18,6 +18,7 @@ import yaml from 'js-yaml';
 import { getSHA256Hash, hashPassword } from 'src/server/utils/crypto';
 import { resolveEnvVarsInAccount } from 'src/server/utils/env';
 import { NodeType } from '../node/lightning.types';
+import { parseAccountUsers, parseYamlUsers, YamlUser } from './yaml-users';
 
 const isValidNetwork = (network: string | null): network is BitcoinNetwork =>
   network === 'mainnet' ||
@@ -233,15 +234,22 @@ export class FilesService {
   }
 
   getAccounts(filePath: string): ParsedAccount[] {
+    return this.getAccountFile(filePath).accounts;
+  }
+
+  getAccountFile(filePath: string): {
+    users: YamlUser[];
+    accounts: ParsedAccount[];
+  } {
     if (filePath === '') {
       this.logger.verbose('No account config file path provided');
-      return [];
+      return { users: [], accounts: [] };
     }
 
     const accountConfig = this.parseYaml(filePath);
     if (!accountConfig) {
       this.logger.info(`No account config file found at path ${filePath}`);
-      return [];
+      return { users: [], accounts: [] };
     }
     return this.getAccountsFromYaml(accountConfig, filePath);
   }
@@ -250,7 +258,8 @@ export class FilesService {
     account: UnresolvedAccountType,
     index: number,
     masterPassword: string | null,
-    defaultNetwork: BitcoinNetwork
+    defaultNetwork: BitcoinNetwork,
+    knownUsers: Set<string> = new Set()
   ): ParsedAccount | null {
     const yamlEnvs = this.configService.get('yamlEnvs');
 
@@ -269,6 +278,7 @@ export class FilesService {
       encrypted,
       twofaSecret,
       authToken,
+      users,
     } = resolvedAccount;
 
     const nodeType = (accountType as NodeType) || NodeType.LND;
@@ -303,9 +313,27 @@ export class FilesService {
       return null;
     }
 
-    if (!password && !masterPassword) {
+    const allowedUsers = this.parseUsersForAccount(
+      users,
+      knownUsers,
+      name || ''
+    );
+    const hasPassword = !!(password || masterPassword);
+
+    // An account is reachable either with its password or through the users
+    // listed on it (trusted header login). It needs at least one of the two.
+    if (!hasPassword && !allowedUsers.length) {
       this.logger.error(
-        `You must set a password for account ${name} or set a master password`
+        `Account ${name} needs a password, a master password, or a list of users`
+      );
+      return null;
+    }
+
+    // An encrypted macaroon is unlocked with the password at login, so a
+    // password is required even when users are listed.
+    if (encrypted && !hasPassword) {
+      this.logger.error(
+        `Account ${name} has an encrypted macaroon and therefore needs a password`
       );
       return null;
     }
@@ -350,21 +378,35 @@ export class FilesService {
       password: password || masterPassword || '',
       twofaSecret: twofaSecret || '',
       authToken: authToken || undefined,
+      users: allowedUsers,
       ...encryptedProps,
     };
+  }
+
+  private parseUsersForAccount(
+    raw: unknown,
+    knownUsers: Set<string>,
+    accountName: string
+  ): string[] {
+    const parsed = parseAccountUsers(raw, knownUsers, accountName);
+    parsed.warnings.forEach(warning => this.logger.warn(warning));
+    return parsed.ids;
   }
 
   getAccountsFromYaml(
     config: AccountConfigType,
     filePath: string
-  ): ParsedAccount[] {
+  ): { users: YamlUser[]; accounts: ParsedAccount[] } {
+    const parsedUsers = parseYamlUsers(config.users);
+    parsedUsers.warnings.forEach(warning => this.logger.warn(warning));
+    const knownUsers = new Set(parsedUsers.users.map(user => user.id));
     const { hashed, accounts: preAccounts } = config;
 
     if (!preAccounts || preAccounts.length <= 0) {
       this.logger.warn(
         `Account config found at path ${filePath} but had no accounts`
       );
-      return [];
+      return { users: parsedUsers.users, accounts: [] };
     }
 
     const { defaultNetwork, masterPassword, accounts } = this.hashPasswords(
@@ -388,7 +430,13 @@ export class FilesService {
 
     const parsedAccounts = accounts
       .map((account, index) =>
-        this.getParsedAccount(account, index, finalMasterPassword, network)
+        this.getParsedAccount(
+          account,
+          index,
+          finalMasterPassword,
+          network,
+          knownUsers
+        )
       )
       .filter(Boolean) as ParsedAccount[];
 
@@ -398,7 +446,7 @@ export class FilesService {
         .join(', ')}`
     );
 
-    return parsedAccounts;
+    return { users: parsedUsers.users, accounts: parsedAccounts };
   }
 
   readMacaroons(macaroonPath: string): string | null {

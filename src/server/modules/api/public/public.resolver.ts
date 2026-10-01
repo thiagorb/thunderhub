@@ -9,8 +9,6 @@ import { Inject } from '@nestjs/common';
 import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
 import { Logger } from 'winston';
 import { ConfigService } from '@nestjs/config';
-import jwt from 'jsonwebtoken';
-import * as cookieLib from 'cookie';
 import { Public } from '../../security/security.decorators';
 import { Throttle, seconds } from '@nestjs/throttler';
 import { UserService } from '../../user/user.service';
@@ -18,10 +16,14 @@ import { AccountsService } from '../../accounts/accounts.service';
 import { FilesService } from '../../files/files.service';
 import { NodeService } from '../../node/node.service';
 import { ContextType } from 'src/server/app.module';
-import { appConstants } from 'src/server/utils/appConstants';
 import { toWithError } from 'src/server/utils/async';
 import { decodeMacaroon, isCorrectPassword } from 'src/server/utils/crypto';
-import { AUTH_PREFIX, AuthType } from '../../security/security.types';
+import { AuthType } from '../../security/security.types';
+import {
+  serializeSessionCookie,
+  signSessionToken,
+} from '../../security/session-cookie';
+import { Principal } from '../../principal/principal.types';
 import { createGuardrails, verifySync } from 'otplib';
 import { CreateInitialUserResult, PublicMutation } from './public.types';
 
@@ -41,6 +43,14 @@ export class PublicResolver {
   @Mutation(() => PublicMutation)
   async public() {
     return {};
+  }
+
+  private startSession(res: ContextType['res'], principal: Principal): void {
+    const jwtSecret = this.configService.get('jwtSecret');
+    const useHttps = this.configService.get('useHttps');
+
+    const token = signSessionToken(principal, jwtSecret);
+    res.setHeader('Set-Cookie', serializeSessionCookie(token, useHttps));
   }
 
   @ResolveField(() => CreateInitialUserResult)
@@ -78,7 +88,6 @@ export class PublicResolver {
     const dangerousNoSSOAuth = this.configService.get('sso.dangerousNoSSOAuth');
     const cookiePath = this.configService.get('cookiePath');
     const isProduction = this.configService.get('isProduction');
-    const useHttps = this.configService.get('useHttps');
 
     const ssoAccount = this.accountsService.getAccount('sso');
 
@@ -127,22 +136,7 @@ export class PublicResolver {
         throw new Error('UnableToConnectToThisNode');
       }
 
-      const jwtSecret = this.configService.get('jwtSecret');
-      const token = jwt.sign(
-        { sub: `${AUTH_PREFIX[AuthType.YAML]}sso` },
-        jwtSecret,
-        { algorithm: 'HS256', expiresIn: '24h' }
-      );
-
-      res.setHeader(
-        'Set-Cookie',
-        cookieLib.serialize(appConstants.cookieName, token, {
-          httpOnly: true,
-          sameSite: true,
-          path: '/',
-          secure: useHttps,
-        })
-      );
+      this.startSession(res, { type: AuthType.YAML, id: 'sso' });
       return true;
     }
 
@@ -177,24 +171,7 @@ export class PublicResolver {
       throw new Error('Wrong credentials for login');
     }
 
-    const jwtSecret = this.configService.get('jwtSecret');
-    const useHttps = this.configService.get('useHttps');
-
-    const jwtToken = jwt.sign(
-      { sub: `${AUTH_PREFIX[AuthType.USER]}${user.id}` },
-      jwtSecret,
-      { algorithm: 'HS256', expiresIn: '24h' }
-    );
-
-    res.setHeader(
-      'Set-Cookie',
-      cookieLib.serialize(appConstants.cookieName, jwtToken, {
-        httpOnly: true,
-        sameSite: true,
-        path: '/',
-        secure: useHttps,
-      })
-    );
+    this.startSession(res, { type: AuthType.USER, id: user.id });
 
     this.logger.debug(`DB session token created for user ${user.id}`);
 
@@ -216,8 +193,13 @@ export class PublicResolver {
     }
 
     const isProduction = this.configService.get('isProduction');
-    const useHttps = this.configService.get('useHttps');
     const disable2FA = this.configService.get('disable2FA');
+
+    // Accounts that only list users have no password to check.
+    if (!account.password) {
+      this.logger.debug(`Account ${id} has no password login`);
+      throw new Error('Wrong credentials for login');
+    }
 
     if (account.encrypted) {
       // In development NestJS rebuilds the files so this only works in production env.
@@ -277,22 +259,7 @@ export class PublicResolver {
       throw new Error('UnableToConnectToThisNode');
     }
 
-    const jwtSecret = this.configService.get('jwtSecret');
-    const jwtToken = jwt.sign(
-      { sub: `${AUTH_PREFIX[AuthType.YAML]}${id}` },
-      jwtSecret,
-      { algorithm: 'HS256', expiresIn: '24h' }
-    );
-
-    res.setHeader(
-      'Set-Cookie',
-      cookieLib.serialize(appConstants.cookieName, jwtToken, {
-        httpOnly: true,
-        sameSite: true,
-        path: '/',
-        secure: useHttps,
-      })
-    );
+    this.startSession(res, { type: AuthType.YAML, id });
     return info?.['version'] || ''; // TODO: Remove unsafe casting when GetWalletInfo type is updated
   }
 }

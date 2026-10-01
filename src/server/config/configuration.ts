@@ -100,6 +100,8 @@ type ConfigType = {
   accountConfigPath: string;
   torProxy: string;
   sso: SSOConfig;
+  /** Lower-cased header name a trusted reverse proxy fills with the user id, or ''. */
+  trustedAuthHeader: string;
   throttler: Throttler;
   urls: Urls;
   yamlEnvs: YamlEnvs;
@@ -110,6 +112,25 @@ type ConfigType = {
   amboss: AmbossConfig;
   clientConfig: ClientConfig;
   database?: DatabaseConfig;
+};
+
+// Headers the browser controls or that carry the session itself can never
+// stand in for a reverse proxy's identity assertion.
+const RESERVED_HEADERS = new Set(['authorization', 'cookie', 'host']);
+
+const readTrustedAuthHeader = (): string => {
+  const header = (process.env.TRUSTED_AUTH_HEADER || '').trim().toLowerCase();
+
+  if (!header) return '';
+
+  if (RESERVED_HEADERS.has(header)) {
+    console.warn(
+      `TRUSTED_AUTH_HEADER cannot be "${header}". Trusted header login is disabled.`
+    );
+    return '';
+  }
+
+  return header;
 };
 
 const VALID_NODE_TYPES = ['lnd', 'litd'];
@@ -181,6 +202,8 @@ export default (): ConfigType => {
     nodeType: getValidNodeType(process.env.SSO_NODE_TYPE),
   };
 
+  const trustedAuthHeader = readTrustedAuthHeader();
+
   const throttler = {
     ttl: Number(process.env.THROTTLE_TTL) || 10,
     limit: Number(process.env.THROTTLE_LIMIT) || 10,
@@ -240,6 +263,7 @@ export default (): ConfigType => {
     headers,
     throttler,
     sso,
+    trustedAuthHeader,
     urls,
     jwtSecret,
     yamlEnvs,
