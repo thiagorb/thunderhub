@@ -45,12 +45,15 @@ export function readAuthToken(cookieHeader?: string): string {
   return '';
 }
 
-/** Rewrites the request cookie header so this request already carries the session. */
+/**
+ * Rewrites the request cookie header so this request already carries the
+ * session. An empty token removes the session cookie instead.
+ */
 export function withAuthCookie(
   cookieHeader: string | undefined,
   token: string
 ): string {
-  const pair = `${appConstants.cookieName}=${token}`;
+  const pair = token ? `${appConstants.cookieName}=${token}` : '';
   if (!cookieHeader) return pair;
 
   const kept = cookieHeader
@@ -58,21 +61,43 @@ export function withAuthCookie(
     .map(part => part.trim())
     .filter(part => part && !part.startsWith(`${appConstants.cookieName}=`));
 
-  kept.push(pair);
+  if (pair) kept.push(pair);
   return kept.join('; ');
+}
+
+export type Session = {
+  sub: string;
+  /** Identifier the session was minted from by the trusted header, if any. */
+  via?: string;
+};
+
+/** The valid session in the cookie header, or null. */
+export function readSession(
+  cookieHeader: string | undefined,
+  jwtSecret: string
+): Session | null {
+  const token = readAuthToken(cookieHeader);
+  if (!token || !jwtSecret) return null;
+
+  try {
+    const payload = jwt.verify(token, jwtSecret, {
+      algorithms: ['HS256'],
+    }) as { sub?: unknown; via?: unknown };
+
+    if (typeof payload?.sub !== 'string' || !payload.sub) return null;
+
+    return {
+      sub: payload.sub,
+      via: typeof payload.via === 'string' ? payload.via : undefined,
+    };
+  } catch {
+    return null;
+  }
 }
 
 export function hasValidSession(
   cookieHeader: string | undefined,
   jwtSecret: string
 ): boolean {
-  const token = readAuthToken(cookieHeader);
-  if (!token || !jwtSecret) return false;
-
-  try {
-    const payload = jwt.verify(token, jwtSecret) as { sub?: string };
-    return typeof payload?.sub === 'string' && payload.sub.length > 0;
-  } catch {
-    return false;
-  }
+  return readSession(cookieHeader, jwtSecret) !== null;
 }

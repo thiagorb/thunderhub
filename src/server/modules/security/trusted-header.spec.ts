@@ -4,6 +4,7 @@ import { signSessionToken } from './session-cookie';
 import {
   hasValidSession,
   readAuthToken,
+  readSession,
   readTrustedIdentifier,
   withAuthCookie,
 } from './trusted-header';
@@ -50,6 +51,27 @@ describe('cookie helpers', () => {
       'theme=dark; Thub-Auth=new'
     );
     expect(withAuthCookie(undefined, 'new')).toBe('Thub-Auth=new');
+    expect(withAuthCookie('theme=dark; Thub-Auth=old', '')).toBe('theme=dark');
+    expect(withAuthCookie('Thub-Auth=old', '')).toBe('');
+  });
+
+  it('reads the subject and the via claim', () => {
+    const plain = signSessionToken({ type: AuthType.USER, id: 'u1' }, secret);
+    expect(readSession(`Thub-Auth=${plain}`, secret)).toEqual({
+      sub: 'user:u1',
+      via: undefined,
+    });
+
+    const trusted = signSessionToken(
+      { type: AuthType.YAML_USER, id: 'a@example.com' },
+      secret,
+      { via: 'a@example.com' }
+    );
+    expect(readSession(`Thub-Auth=${trusted}`, secret)).toEqual({
+      sub: 'yaml-user:a@example.com',
+      via: 'a@example.com',
+    });
+    expect(readSession(undefined, secret)).toBeNull();
   });
 
   it('accepts a signed session and rejects an expired one', () => {
@@ -149,7 +171,8 @@ describe('TrustedHeaderMiddleware', () => {
     expect(next).toHaveBeenCalledTimes(3);
     expect(principalService.fromTrustedIdentifier).not.toHaveBeenCalled();
     expect(headers['set-cookie']).toBeUndefined();
-    expect(logger.warn).toHaveBeenCalled();
+    expect(logger.warn).not.toHaveBeenCalled();
+    expect(logger.debug).toHaveBeenCalled();
   });
 
   it('creates a session for the resolved principal', async () => {
@@ -185,7 +208,7 @@ describe('TrustedHeaderMiddleware', () => {
     expect(String(headers['set-cookie'])).toContain('HttpOnly');
   });
 
-  it('leaves an existing valid session alone', async () => {
+  it('leaves a session minted from the same identifier alone', async () => {
     const principalService = { fromTrustedIdentifier: jest.fn() };
     const middleware = new TrustedHeaderMiddleware(
       makeConfig('x-authentik-email') as any,
@@ -193,12 +216,13 @@ describe('TrustedHeaderMiddleware', () => {
       logger as any
     );
     const existing = signSessionToken(
-      { type: AuthType.YAML, id: 'account' },
-      secret
+      { type: AuthType.YAML_USER, id: 'a@example.com' },
+      secret,
+      { via: 'a@example.com' }
     );
     const req = {
       headers: {
-        'x-authentik-email': 'a@example.com',
+        'x-authentik-email': 'A@Example.com',
         cookie: `Thub-Auth=${existing}`,
       },
       socket: fromProxy,
@@ -209,6 +233,135 @@ describe('TrustedHeaderMiddleware', () => {
 
     expect(principalService.fromTrustedIdentifier).not.toHaveBeenCalled();
     expect(req.headers.cookie).toBe(`Thub-Auth=${existing}`);
+    expect(headers['set-cookie']).toBeUndefined();
+  });
+
+  it('switches the session when the header names someone else', async () => {
+    const principalService = {
+      fromTrustedIdentifier: jest
+        .fn()
+        .mockResolvedValue({ type: AuthType.YAML_USER, id: 'b@example.com' }),
+      fromSubject: parseSubject,
+      toSubject: () => 'yaml-user:b@example.com',
+    };
+    const middleware = new TrustedHeaderMiddleware(
+      makeConfig('x-authentik-email') as any,
+      principalService as any,
+      logger as any
+    );
+    // Alice's session, created by the header earlier; now Bob is at the proxy.
+    const alice = signSessionToken(
+      { type: AuthType.YAML_USER, id: 'a@example.com' },
+      secret,
+      { via: 'a@example.com' }
+    );
+    const req = {
+      headers: {
+        'x-authentik-email': 'b@example.com',
+        cookie: `theme=dark; Thub-Auth=${alice}`,
+      },
+      socket: fromProxy,
+    } as any;
+    const { res, headers } = makeRes();
+
+    await middleware.use(req, res, jest.fn());
+
+    expect(req.headers.cookie).toMatch(/^theme=dark; Thub-Auth=/);
+    expect(sessionSubject(req.headers.cookie.split('; ')[1])).toEqual({
+      type: AuthType.YAML_USER,
+      id: 'b@example.com',
+    });
+    expect(String(headers['set-cookie'])).toContain('Thub-Auth=ey');
+  });
+
+  it('overrides a password session with the header identity', async () => {
+    const principalService = {
+      fromTrustedIdentifier: jest
+        .fn()
+        .mockResolvedValue({ type: AuthType.USER, id: 'db-1' }),
+      fromSubject: parseSubject,
+      toSubject: () => 'user:db-1',
+    };
+    const middleware = new TrustedHeaderMiddleware(
+      makeConfig('x-authentik-email') as any,
+      principalService as any,
+      logger as any
+    );
+    const password = signSessionToken(
+      { type: AuthType.YAML, id: 'account' },
+      secret
+    );
+    const req = {
+      headers: {
+        'x-authentik-email': 'db@example.com',
+        cookie: `Thub-Auth=${password}`,
+      },
+      socket: fromProxy,
+    } as any;
+
+    await middleware.use(req, makeRes().res, jest.fn());
+
+    expect(sessionSubject(req.headers.cookie)).toEqual({
+      type: AuthType.USER,
+      id: 'db-1',
+    });
+    expect(readSession(req.headers.cookie, secret)?.via).toBe('db@example.com');
+  });
+
+  it('ends a header session when the header now names an unknown user', async () => {
+    const principalService = {
+      fromTrustedIdentifier: jest.fn().mockResolvedValue(null),
+    };
+    const middleware = new TrustedHeaderMiddleware(
+      makeConfig('x-authentik-email') as any,
+      principalService as any,
+      logger as any
+    );
+    const alice = signSessionToken(
+      { type: AuthType.YAML_USER, id: 'a@example.com' },
+      secret,
+      { via: 'a@example.com' }
+    );
+    const req = {
+      headers: {
+        'x-authentik-email': 'stranger@example.com',
+        cookie: `theme=dark; Thub-Auth=${alice}`,
+      },
+      socket: fromProxy,
+    } as any;
+    const { res, headers } = makeRes();
+
+    await middleware.use(req, res, jest.fn());
+
+    expect(req.headers.cookie).toBe('theme=dark');
+    expect(String(headers['set-cookie'])).toMatch(/Thub-Auth=;.*Max-Age=-1/);
+  });
+
+  it('keeps a password session when the header names an unknown user', async () => {
+    const principalService = {
+      fromTrustedIdentifier: jest.fn().mockResolvedValue(null),
+    };
+    const middleware = new TrustedHeaderMiddleware(
+      makeConfig('x-authentik-email') as any,
+      principalService as any,
+      logger as any
+    );
+    const password = signSessionToken(
+      { type: AuthType.YAML, id: 'account' },
+      secret
+    );
+    const req = {
+      headers: {
+        'x-authentik-email': 'stranger@example.com',
+        cookie: `Thub-Auth=${password}`,
+      },
+      socket: fromProxy,
+    } as any;
+    const { res, headers } = makeRes();
+
+    await middleware.use(req, res, jest.fn());
+
+    expect(req.headers.cookie).toBe(`Thub-Auth=${password}`);
     expect(headers['set-cookie']).toBeUndefined();
   });
 

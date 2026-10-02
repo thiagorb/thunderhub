@@ -85,9 +85,9 @@ export class PrincipalService {
 
     if (!this.userService.isDbEnabled()) return null;
 
-    const user = await this.userService.getUserByEmail(id);
+    const user = await this.userService.getUserByEmail(identifier);
     if (!user) {
-      this.logger.debug(`DB user not found for email: ${id}`);
+      this.logger.debug(`DB user not found for email: ${identifier}`);
       return null;
     }
 

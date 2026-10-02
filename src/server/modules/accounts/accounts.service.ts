@@ -174,17 +174,6 @@ export class AccountsService implements OnModuleInit {
     return this.accounts[id] || null;
   }
 
-  getAccountBySlug(slug: string): EnrichedAccount | null {
-    if (!slug) return null;
-    for (const key of Object.keys(this.accounts)) {
-      const account = this.accounts[key];
-      if (account.slug === slug) {
-        return account;
-      }
-    }
-    return null;
-  }
-
   async getDbNodeBySlug(
     slug: string,
     userId: string
