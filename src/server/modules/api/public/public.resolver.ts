@@ -24,6 +24,7 @@ import {
   signSessionToken,
 } from '../../security/session-cookie';
 import { Principal } from '../../principal/principal.types';
+import { PrincipalService } from '../../principal/principal.service';
 import { createGuardrails, verifySync } from 'otplib';
 import { CreateInitialUserResult, PublicMutation } from './public.types';
 
@@ -35,6 +36,7 @@ export class PublicResolver {
     private readonly accountsService: AccountsService,
     private readonly filesService: FilesService,
     private readonly nodeService: NodeService,
+    private readonly principalService: PrincipalService,
     @Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger
   ) {}
 
@@ -144,36 +146,28 @@ export class PublicResolver {
     return false;
   }
 
+  /**
+   * Signs in a person by identifier and password: a YAML user with a
+   * password, or a database user by email.
+   */
   @ResolveField(() => Boolean)
   async get_db_session_token(
     @Args('email') email: string,
     @Args('password') password: string,
     @Context() { res }: ContextType
   ): Promise<boolean> {
-    if (!this.userService.isDbEnabled()) {
-      throw new Error('Database is not enabled');
-    }
-
-    const user = await this.userService.getUserByEmail(email);
-
-    if (!user) {
-      this.logger.debug(`DB user not found for email: ${email}`);
-      throw new Error('Wrong credentials for login');
-    }
-
-    const isValid = await this.userService.verifyPassword(
-      user.password_hash,
+    const principal = await this.principalService.fromCredentials(
+      email,
       password
     );
 
-    if (!isValid) {
-      this.logger.error('DB authentication failed - invalid password');
+    if (!principal) {
       throw new Error('Wrong credentials for login');
     }
 
-    this.startSession(res, { type: AuthType.USER, id: user.id });
+    this.startSession(res, principal);
 
-    this.logger.debug(`DB session token created for user ${user.id}`);
+    this.logger.debug(`Session token created for ${principal.type} login`);
 
     return true;
   }

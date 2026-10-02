@@ -14,6 +14,20 @@ describe('parseYamlUsers', () => {
     ]);
   });
 
+  it('keeps a password only when one is set', () => {
+    const parsed = parseYamlUsers([
+      { id: 'a', password: 'thunderhub-hash' },
+      { id: 'b', password: '' },
+      { id: 'c', password: 42 },
+    ]);
+
+    expect(parsed.users).toEqual([
+      { id: 'a', name: 'a', password: 'thunderhub-hash' },
+      { id: 'b', name: 'b' },
+      { id: 'c', name: 'c' },
+    ]);
+  });
+
   it('keeps the first duplicate', () => {
     const parsed = parseYamlUsers(['a@example.com', 'A@Example.com']);
 

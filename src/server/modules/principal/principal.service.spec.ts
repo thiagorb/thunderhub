@@ -1,7 +1,17 @@
 import { AuthType } from '../security/security.types';
 import { PrincipalService } from './principal.service';
+import { getSHA256Hash, hashPassword } from '../../utils/crypto';
 
-const logger = { warn: jest.fn(), info: jest.fn(), error: jest.fn() };
+const logger = {
+  warn: jest.fn(),
+  info: jest.fn(),
+  error: jest.fn(),
+  debug: jest.fn(),
+};
+
+// What the login form sends for the plain text "hunter2".
+const YOU_DIGEST = getSHA256Hash('hunter2');
+const YOU_HASH = hashPassword(YOU_DIGEST);
 
 const yamlAccount = (hash: string, name: string, users: string[] = []) => ({
   hash,
@@ -26,10 +36,12 @@ const accountsService = {
     [home, test, solo].find(a => a.hash === id) ?? null,
   getYamlUser: (id: string) =>
     id === 'you@example.com'
-      ? { id, name: 'You' }
-      : id === 'lonely'
-        ? { id, name: 'Lonely' }
-        : null,
+      ? { id, name: 'You', password: YOU_HASH }
+      : id === 'guest'
+        ? { id, name: 'Guest' }
+        : id === 'lonely'
+          ? { id, name: 'Lonely', password: YOU_HASH }
+          : null,
   getAccountsForYamlUser: (id: string) =>
     [home, test].filter(a => a.users.includes(id)),
   getDbNodeBySlug: jest.fn(async (slug: string, userId: string) =>
@@ -43,6 +55,12 @@ const userService = {
   isDbEnabled: () => true,
   findUserIdByEmail: async (email: string) =>
     email === 'db@example.com' ? 'db-1' : null,
+  getUserByEmail: async (email: string) =>
+    email === 'db@example.com'
+      ? { id: 'db-1', email, password_hash: 'db-hash', role: 'admin' }
+      : null,
+  verifyPassword: async (hash: string, password: string) =>
+    hash === 'db-hash' && password === 'db-digest',
   getUserById: async (id: string) =>
     id === 'db-1' ? { id, email: 'db@example.com' } : null,
   getUserNodes: async (id: string) =>
@@ -88,6 +106,34 @@ describe('PrincipalService.fromTrustedIdentifier', () => {
   it('returns null for unknown identifiers', async () => {
     expect(await service.fromTrustedIdentifier('nobody')).toBeNull();
     expect(await service.fromTrustedIdentifier('')).toBeNull();
+  });
+});
+
+describe('PrincipalService.fromCredentials', () => {
+  it('signs in a YAML user with the digest of their password', async () => {
+    expect(
+      await service.fromCredentials(' You@Example.com ', YOU_DIGEST)
+    ).toEqual({ type: AuthType.YAML_USER, id: 'you@example.com' });
+  });
+
+  it('rejects a wrong password and a user without one', async () => {
+    expect(
+      await service.fromCredentials('you@example.com', getSHA256Hash('nope'))
+    ).toBeNull();
+    expect(await service.fromCredentials('guest', YOU_DIGEST)).toBeNull();
+    expect(await service.fromCredentials('you@example.com', '')).toBeNull();
+  });
+
+  it('refuses a YAML user that is on no account even with a password', async () => {
+    expect(await service.fromCredentials('lonely', YOU_DIGEST)).toBeNull();
+  });
+
+  it('falls back to a database user', async () => {
+    expect(
+      await service.fromCredentials('db@example.com', 'db-digest')
+    ).toEqual({ type: AuthType.USER, id: 'db-1' });
+    expect(await service.fromCredentials('db@example.com', 'bad')).toBeNull();
+    expect(await service.fromCredentials('nobody', 'db-digest')).toBeNull();
   });
 });
 

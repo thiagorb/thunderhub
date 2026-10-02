@@ -344,9 +344,12 @@ export class PublicQueriesResolver {
       });
     }
 
-    // Add a DB account entry when the database has users
-    const dbHasUsers = await this.userService.hasUsers();
-    if (dbHasUsers) {
+    // Offer the identifier + password form when someone can use it: a
+    // database user or a YAML user with a password.
+    const hasUserLogin =
+      this.accountsService.hasYamlUserPasswords() ||
+      (await this.userService.hasUsers());
+    if (hasUserLogin) {
       mapped.push({
         name: 'Account Login',
         id: 'db',

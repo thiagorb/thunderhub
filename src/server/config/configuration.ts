@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import { readFileSync } from 'fs';
 import { join } from 'path';
+import { parseTrustedProxyIps } from '../modules/security/trusted-proxy';
 
 type SSOConfig = {
   serverUrl: string;
@@ -102,6 +103,8 @@ type ConfigType = {
   sso: SSOConfig;
   /** Lower-cased header name a trusted reverse proxy fills with the user id, or ''. */
   trustedAuthHeader: string;
+  /** Addresses and CIDR ranges of the proxies allowed to send that header. */
+  trustedProxyIps: string[];
   throttler: Throttler;
   urls: Urls;
   yamlEnvs: YamlEnvs;
@@ -118,19 +121,43 @@ type ConfigType = {
 // stand in for a reverse proxy's identity assertion.
 const RESERVED_HEADERS = new Set(['authorization', 'cookie', 'host']);
 
-const readTrustedAuthHeader = (): string => {
+/**
+ * The trusted header is only honoured from the proxies listed in
+ * TRUSTED_PROXY_IPS, so without that list the feature stays off.
+ */
+const readTrustedAuth = (): {
+  trustedAuthHeader: string;
+  trustedProxyIps: string[];
+} => {
   const header = (process.env.TRUSTED_AUTH_HEADER || '').trim().toLowerCase();
+  const { ranges, invalid } = parseTrustedProxyIps(
+    process.env.TRUSTED_PROXY_IPS
+  );
+  const disabled = { trustedAuthHeader: '', trustedProxyIps: ranges };
 
-  if (!header) return '';
+  if (invalid.length) {
+    console.warn(
+      `TRUSTED_PROXY_IPS contains invalid entries: ${invalid.join(', ')}`
+    );
+  }
+
+  if (!header) return disabled;
 
   if (RESERVED_HEADERS.has(header)) {
     console.warn(
       `TRUSTED_AUTH_HEADER cannot be "${header}". Trusted header login is disabled.`
     );
-    return '';
+    return disabled;
   }
 
-  return header;
+  if (!ranges.length) {
+    console.warn(
+      'TRUSTED_AUTH_HEADER is set but TRUSTED_PROXY_IPS lists no valid proxy. Trusted header login is disabled.'
+    );
+    return disabled;
+  }
+
+  return { trustedAuthHeader: header, trustedProxyIps: ranges };
 };
 
 const VALID_NODE_TYPES = ['lnd', 'litd'];
@@ -202,7 +229,7 @@ export default (): ConfigType => {
     nodeType: getValidNodeType(process.env.SSO_NODE_TYPE),
   };
 
-  const trustedAuthHeader = readTrustedAuthHeader();
+  const { trustedAuthHeader, trustedProxyIps } = readTrustedAuth();
 
   const throttler = {
     ttl: Number(process.env.THROTTLE_TTL) || 10,
@@ -264,6 +291,7 @@ export default (): ConfigType => {
     throttler,
     sso,
     trustedAuthHeader,
+    trustedProxyIps,
     urls,
     jwtSecret,
     yamlEnvs,

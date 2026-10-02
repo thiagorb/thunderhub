@@ -3,7 +3,9 @@ import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
 import { Logger } from 'winston';
 import { AccountsService } from '../accounts/accounts.service';
 import { EnrichedAccount } from '../accounts/accounts.types';
+import { YamlUser } from '../files/yaml-users';
 import { UserService } from '../user/user.service';
+import { isCorrectPassword } from '../../utils/crypto';
 import { AuthType, parseSubject, toSubject } from '../security/security.types';
 import {
   Principal,
@@ -45,13 +47,7 @@ export class PrincipalService {
 
     const yamlUser = this.accountsService.getYamlUser(id);
     if (yamlUser) {
-      if (!this.accountsService.getAccountsForYamlUser(yamlUser.id).length) {
-        this.logger.warn(
-          `YAML user "${yamlUser.id}" is not allowed on any account. Refusing the trusted header.`
-        );
-        return null;
-      }
-      return { type: AuthType.YAML_USER, id: yamlUser.id };
+      return this.yamlUserPrincipal(yamlUser, 'the trusted header');
     }
 
     if (this.userService.isDbEnabled()) {
@@ -60,6 +56,62 @@ export class PrincipalService {
     }
 
     return null;
+  }
+
+  /**
+   * Resolves an identifier and password typed into the login form. A YAML
+   * user with a password is checked first; otherwise the database is asked.
+   * The password is the SHA-256 digest the form sends, not the plain text.
+   */
+  async fromCredentials(
+    identifier: string,
+    password: string
+  ): Promise<Principal | null> {
+    const id = identifier.trim().toLowerCase();
+    if (!id || !password) return null;
+
+    const yamlUser = this.accountsService.getYamlUser(id);
+    if (yamlUser) {
+      if (!yamlUser.password) {
+        this.logger.debug(`YAML user "${id}" has no password login`);
+        return null;
+      }
+      if (!isCorrectPassword(password, yamlUser.password)) {
+        this.logger.error(`Wrong password for YAML user "${id}"`);
+        return null;
+      }
+      return this.yamlUserPrincipal(yamlUser, 'the login');
+    }
+
+    if (!this.userService.isDbEnabled()) return null;
+
+    const user = await this.userService.getUserByEmail(id);
+    if (!user) {
+      this.logger.debug(`DB user not found for email: ${id}`);
+      return null;
+    }
+
+    const isValid = await this.userService.verifyPassword(
+      user.password_hash,
+      password
+    );
+    if (!isValid) {
+      this.logger.error('DB authentication failed - invalid password');
+      return null;
+    }
+
+    return { type: AuthType.USER, id: user.id };
+  }
+
+  /** A YAML user is only useful when at least one account lists them. */
+  private yamlUserPrincipal(user: YamlUser, via: string): Principal | null {
+    if (!this.accountsService.getAccountsForYamlUser(user.id).length) {
+      this.logger.warn(
+        `YAML user "${user.id}" is not allowed on any account. Refusing ${via}.`
+      );
+      return null;
+    }
+    return { type: AuthType.YAML_USER, id: user.id };
   }
 
   capabilities(principal: Principal): PrincipalCapabilities {

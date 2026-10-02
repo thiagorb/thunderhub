@@ -69,7 +69,7 @@ export type AccountConfigType = {
   onchainPushEnabled: boolean | null;
   channelPushEnabled: boolean | null;
   privateChannelPushEnabled: boolean | null;
-  users?: Array<string | { id?: string; name?: string }>;
+  users?: Array<string | { id?: string; name?: string; password?: string }>;
   accounts: AccountType[];
 };
 

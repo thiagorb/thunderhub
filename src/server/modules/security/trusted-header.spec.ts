@@ -67,18 +67,26 @@ describe('cookie helpers', () => {
 });
 
 describe('TrustedHeaderMiddleware', () => {
-  const makeConfig = (headerName: string) => ({
+  const makeConfig = (headerName: string, proxies = ['10.0.0.0/8']) => ({
     get: (key: string) =>
       (
         ({
           trustedAuthHeader: headerName,
+          trustedProxyIps: proxies,
           jwtSecret: secret,
           useHttps: false,
-        }) as Record<string, string | boolean>
+        }) as Record<string, string | boolean | string[]>
       )[key],
   });
 
-  const logger = { info: jest.fn(), debug: jest.fn(), error: jest.fn() };
+  const fromProxy = { remoteAddress: '::ffff:10.1.2.3' };
+
+  const logger = {
+    info: jest.fn(),
+    debug: jest.fn(),
+    warn: jest.fn(),
+    error: jest.fn(),
+  };
 
   const makeRes = () => {
     const headers: Record<string, string | string[]> = {};
@@ -106,7 +114,10 @@ describe('TrustedHeaderMiddleware', () => {
       principalService as any,
       logger as any
     );
-    const req = { headers: { 'x-authentik-email': 'a@example.com' } } as any;
+    const req = {
+      headers: { 'x-authentik-email': 'a@example.com' },
+      socket: fromProxy,
+    } as any;
     const next = jest.fn();
 
     await middleware.use(req, makeRes().res, next);
@@ -114,6 +125,31 @@ describe('TrustedHeaderMiddleware', () => {
     expect(next).toHaveBeenCalled();
     expect(req.headers.cookie).toBeUndefined();
     expect(principalService.fromTrustedIdentifier).not.toHaveBeenCalled();
+  });
+
+  it('ignores the header when the peer is not a trusted proxy', async () => {
+    const principalService = { fromTrustedIdentifier: jest.fn() };
+    const middleware = new TrustedHeaderMiddleware(
+      makeConfig('x-authentik-email') as any,
+      principalService as any,
+      logger as any
+    );
+    const { res, headers } = makeRes();
+    const next = jest.fn();
+
+    for (const socket of [{ remoteAddress: '192.168.1.9' }, {}, undefined]) {
+      const req = {
+        headers: { 'x-authentik-email': 'a@example.com' },
+        socket,
+      } as any;
+      await middleware.use(req, res, next);
+      expect(req.headers.cookie).toBeUndefined();
+    }
+
+    expect(next).toHaveBeenCalledTimes(3);
+    expect(principalService.fromTrustedIdentifier).not.toHaveBeenCalled();
+    expect(headers['set-cookie']).toBeUndefined();
+    expect(logger.warn).toHaveBeenCalled();
   });
 
   it('creates a session for the resolved principal', async () => {
@@ -128,7 +164,10 @@ describe('TrustedHeaderMiddleware', () => {
       principalService as any,
       logger as any
     );
-    const req = { headers: { 'x-authentik-email': 'A@Example.com' } } as any;
+    const req = {
+      headers: { 'x-authentik-email': 'A@Example.com' },
+      socket: fromProxy,
+    } as any;
     const { res, headers } = makeRes();
     const next = jest.fn();
 
@@ -162,6 +201,7 @@ describe('TrustedHeaderMiddleware', () => {
         'x-authentik-email': 'a@example.com',
         cookie: `Thub-Auth=${existing}`,
       },
+      socket: fromProxy,
     } as any;
     const { res, headers } = makeRes();
 
@@ -183,6 +223,7 @@ describe('TrustedHeaderMiddleware', () => {
     );
     const req = {
       headers: { 'x-authentik-email': 'nobody@example.com' },
+      socket: fromProxy,
     } as any;
     const { res, headers } = makeRes();
     const next = jest.fn();

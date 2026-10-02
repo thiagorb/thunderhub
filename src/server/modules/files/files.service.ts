@@ -149,9 +149,31 @@ export class FilesService {
 
     cloned.masterPassword = hashedMasterPassword;
 
+    // User passwords arrive from the login form as a SHA-256 digest (the
+    // same form database users sign in with), so that digest is what gets
+    // hashed and compared, not the plain text written in the file.
+    if (Array.isArray(config.users)) {
+      cloned.users = config.users.map(user => {
+        if (
+          typeof user !== 'object' ||
+          !user ||
+          typeof user.password !== 'string' ||
+          !user.password ||
+          user.password.indexOf(PRE_PASS_STRING) >= 0
+        ) {
+          return user;
+        }
+        hasChanged = true;
+        return {
+          ...user,
+          password: hashPassword(getSHA256Hash(user.password)),
+        };
+      });
+    }
+
     const hashedAccounts: AccountType[] = [];
 
-    for (let i = 0; i < config.accounts.length; i++) {
+    for (let i = 0; i < (config.accounts || []).length; i++) {
       const account: AccountType = config.accounts[i];
       if (account.password) {
         let hashedPassword = account.password;
@@ -167,7 +189,7 @@ export class FilesService {
       }
     }
 
-    cloned.accounts = hashedAccounts;
+    if (config.accounts) cloned.accounts = hashedAccounts;
 
     if (hasChanged) this.saveHashedYaml(cloned, filePath);
 
@@ -397,23 +419,23 @@ export class FilesService {
     config: AccountConfigType,
     filePath: string
   ): { users: YamlUser[]; accounts: ParsedAccount[] } {
-    const parsedUsers = parseYamlUsers(config.users);
+    const {
+      defaultNetwork,
+      masterPassword,
+      accounts,
+      users: hashedUsers,
+    } = this.hashPasswords(config.hashed || false, config, filePath);
+
+    const parsedUsers = parseYamlUsers(hashedUsers);
     parsedUsers.warnings.forEach(warning => this.logger.warn(warning));
     const knownUsers = new Set(parsedUsers.users.map(user => user.id));
-    const { hashed, accounts: preAccounts } = config;
 
-    if (!preAccounts || preAccounts.length <= 0) {
+    if (!accounts || accounts.length <= 0) {
       this.logger.warn(
         `Account config found at path ${filePath} but had no accounts`
       );
       return { users: parsedUsers.users, accounts: [] };
     }
-
-    const { defaultNetwork, masterPassword, accounts } = this.hashPasswords(
-      hashed || false,
-      config,
-      filePath
-    );
 
     const masterPasswordOverride = this.configService.get<string>(
       'masterPasswordOverride'

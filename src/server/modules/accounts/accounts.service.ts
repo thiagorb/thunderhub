@@ -145,6 +145,14 @@ export class AccountsService implements OnModuleInit {
     return this.yamlUsers.get(id.trim().toLowerCase()) || null;
   }
 
+  /** Whether any YAML user can sign in with a password. */
+  hasYamlUserPasswords(): boolean {
+    for (const user of this.yamlUsers.values()) {
+      if (user.password) return true;
+    }
+    return false;
+  }
+
   /**
    * YAML accounts that list the user. Encrypted accounts are excluded: their
    * macaroon can only be unlocked with the account password.

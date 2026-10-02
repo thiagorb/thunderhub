@@ -1,9 +1,13 @@
 export type YamlUser = {
   id: string;
   name: string;
+  /** Hashed password, when the user can sign in with one. */
+  password?: string;
 };
 
-export type YamlUserInput = string | { id?: string; name?: string };
+export type YamlUserInput =
+  | string
+  | { id?: string; name?: string; password?: string };
 
 const MAX_IDENTIFIER_LENGTH = 254;
 
@@ -52,14 +56,17 @@ export function parseYamlUsers(raw: unknown): {
     }
 
     seen.add(id);
+    const object = typeof entry === 'object' && entry ? entry : {};
     const name =
-      typeof entry === 'object' &&
-      entry &&
-      typeof entry.name === 'string' &&
-      entry.name.trim()
-        ? entry.name.trim()
+      typeof object.name === 'string' && object.name.trim()
+        ? object.name.trim()
         : id;
-    users.push({ id, name });
+    const password =
+      typeof object.password === 'string' && object.password
+        ? object.password
+        : undefined;
+
+    users.push(password ? { id, name, password } : { id, name });
   }
 
   return { users, warnings };
